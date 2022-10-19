@@ -76,83 +76,110 @@ void sr_handlepacket(struct sr_instance* sr,
     sr_ethernet_hdr_t *eth_hdr = (sr_ethernet_hdr_t *)packet;
     
     uint16_t packet_ether_type = ethertype(packet);
-    /* It's a IP Packet*/
-    if (packet_ether_type == ethertype_ip) {
-        /* Handle IP Packet */
-        if (len < sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t))
-        {
-            printf("sr_handlepacket: IP packet doesn't meet minimum length.\n");
-            return;
-        }
-
-        /* IP header is after the Ethernet header */
-        sr_ip_hdr_t *ip_hdr = (sr_ip_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t));
-
-        printf("----------- It's an IP Packet ------------\n");
-        print_hdr_eth(packet);
-        print_hdr_ip(packet + sizeof(sr_ethernet_hdr_t));
-        printf("------------------------------------------\n");
-
-        /* Verify checksum */
-        uint16_t checksum = ip_hdr->ip_sum;
-        ip_hdr->ip_sum = 0;
-        if (checksum != cksum(ip_hdr, sizeof(sr_ip_hdr_t)))
-        {
-            printf("sr_handlepacket: IP packet has incorrect checksum.\n");
-            return;
-        }
-
-        /* Check if the IP address matches the current router's IP addresses */
-        struct sr_if *if_walker = sr->if_list;
-        struct sr_if *src_inf = sr_get_interface(sr, interface);
-        while (if_walker)
-        {
-            if (if_walker->ip == ip_hdr->ip_dst)
-            {
-                /* Get the struct from the name */
-                handle_ip(sr, ip_hdr, src_inf, packet, len);
+    
+    switch (packet_ether_type) {
+        /* It's a IP Packet*/
+        case ethertype_ip:
+            if ((sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t)) > len) {
+                printf("sr_handlepacket: IP packet length doesn't reach the min length.\n");
                 return;
             }
-            if_walker = if_walker->next;
-        }
-        forward_ip(sr, ip_hdr, eth_hdr, packet, len, src_inf);
-    }
-    /* It's an ARP Packet type*/
-    else if (packet_ether_type == ethertype_arp) {
-        if (len < sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t))
-        {
-            fprintf(stderr, "sr_handlepacket: ARP packet doesn't meet minimum length.\n");
-            return;
-        }
 
-        sr_arp_hdr_t *arp_hdr = (sr_arp_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t));
+            /* Ethernet header is before ip header */
+            sr_ip_hdr_t *header_ip = (sr_ip_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t));
 
-        printf("------------ It's an ARP Packet ----------------\n");
-        print_hdr_eth(packet);
-        print_hdr_arp(packet + sizeof(sr_ethernet_hdr_t));
-        printf("------------------------------------------------\n");
+            printf("----------- IP Packet ------------\n");
+            print_hdr_eth(packet);
+            print_hdr_ip(packet + sizeof(sr_ethernet_hdr_t));
+            printf("------------------------------------------\n");
 
-        /*
-         * For ARP Requests: Send an ARP reply if the target IP address is one of your router’s IP addresses.
-         * For ARP Replies: Cache the entry if the target IP address is one of your router’s IP addresses.
-         * Check if target IP is one of router's IP addresses.
-         * */
-        struct sr_if *if_walker = sr->if_list;
-        while (if_walker)
-        {
-            if (if_walker->ip == arp_hdr->ar_tip)
-            {
-                handle_arp(sr, arp_hdr, packet, if_walker);
+            /* Verify cksum_ip */
+            uint16_t cksum_ip = header_ip->ip_sum;
+            header_ip->ip_sum = 0;
+            if (cksum_ip != cksum(header_ip, sizeof(sr_ip_hdr_t))) {
+                printf("sr_handlepacket: the checksum of ip packet is incorrect.\n");
                 return;
             }
-            if_walker = if_walker->next;
-        }
-        printf("sr_handlepacket: target IP cannot be found.\n");
+
+            /* Check if the IP address matches the current router's IP addresses */
+            struct sr_if *interface_iterator = sr->if_list;
+            struct sr_if *current_interface = sr_get_interface(sr, interface);
+            while (interface_iterator) {
+                if (interface_iterator->ip == header_ip->ip_dst)
+                {
+                    /* Get the struct from the name */
+                    process_ip(sr, header_ip, current_interface, packet, len);
+                    return;
+                }
+                interface_iterator = interface_iterator->next;
+            }
+            forward_ip(sr, header_ip, eth_hdr, packet, len, current_interface);
+            break;
+        /*it's a arp packet */
+        case ethertype_arp:
+            if ((sizeof(sr_arp_hdr_t) + sizeof(sr_ethernet_hdr_t)) > len) {
+                fprintf(stderr, "sr_handlepacket: ARP packet length doesn't meet min length.\n");
+                return;
+            }
+
+            sr_arp_hdr_t *header_arp = (sr_arp_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t));
+
+            printf("------------ ARP Packet ----------------\n");
+            print_hdr_eth(packet);
+            print_hdr_arp(packet + sizeof(sr_ethernet_hdr_t));
+            printf("------------------------------------------------\n");
+
+            /*
+            * For ARP Requests: Send an ARP reply if the goal IP address is one of your router’s IP addresses.
+            * For ARP Replies: Cache the entry if the goal IP address is one of your router’s IP addresses.
+            * Check if goal IP is one of router's IP addresses.
+            * */
+            struct sr_if *interface_iterator2 = sr->if_list;
+            while (interface_iterator2)
+            {
+                if (interface_iterator2->ip == header_arp->ar_tip)
+                {
+                    process_arp(sr, header_arp, packet, interface_iterator2);
+                    return;
+                }
+                interface_iterator2 = interface_iterator2->next;
+            }
+            printf("sr_handlepacket: goal IP cannot be found.\n");
+            break;
     }
 
 }/* end sr_ForwardPacket */
 
-void handle_arp(struct sr_instance *sr, sr_arp_hdr_t *arp_hdr, uint8_t *packet, struct sr_if *inf)
+void process_ip(struct sr_instance *sr, sr_ip_hdr_t *ip_hdr, struct sr_if *inf, uint8_t *packet, unsigned int len)
+{
+    if (ip_hdr->ip_p != ip_protocol_icmp) {
+        printf("TCP/UDP message.\n");
+        /* Send ICMP type 3 code 3: Port Unreachable */
+        send_icmp_message(sr, packet, inf, 3, 3, len);
+    }
+    else {
+        printf("ICMP message.\n");
+
+        if ((sizeof(sr_ip_hdr_t) + sizeof(sr_ethernet_hdr_t) + sizeof(sr_icmp_hdr_t)) > len) {
+            printf("process_ip: ICMP header length doesn't reach minimum length.\n");
+            return;
+        }
+
+        /* IP header is before icmp header */
+        sr_icmp_hdr_t *header_icmp = (sr_icmp_hdr_t *)(packet + sizeof(sr_ip_hdr_t) + sizeof(sr_ethernet_hdr_t));
+        printf("------------ ICMP HEADER ------------------\n");
+        print_hdr_icmp(packet + sizeof(sr_ip_hdr_t) + sizeof(sr_ethernet_hdr_t));
+        printf("-----------------------------------------\n");
+
+        /* if it's an ICMP echo request, send echo reply */
+        if (header_icmp->icmp_type == 8) {
+            /* establish ICMP echo reply */
+            send_icmp_message(sr, packet, inf, 0, 0, len);
+        }
+    }
+}
+
+void process_arp(struct sr_instance *sr, sr_arp_hdr_t *arp_hdr, uint8_t *packet, struct sr_if *inf)
 {
     switch (ntohs(arp_hdr->ar_op))
     {
@@ -221,38 +248,6 @@ void handle_arp(struct sr_instance *sr, sr_arp_hdr_t *arp_hdr, uint8_t *packet, 
     }
 }
 
-void handle_ip(struct sr_instance *sr, sr_ip_hdr_t *ip_hdr, struct sr_if *inf, uint8_t *packet, unsigned int len)
-{
-    if (ip_hdr->ip_p == ip_protocol_icmp)
-    {
-        printf("An ICMP message.\n");
-
-        if (len < sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t) + sizeof(sr_icmp_hdr_t))
-        {
-            printf("handle_ip: ICMP header doesn't meet minimum length.\n");
-            return;
-        }
-
-        /* ICMP header is after the IP header */
-        sr_icmp_hdr_t *icmp_hdr = (sr_icmp_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t));
-        printf("------------ ICMP HDR ------------------\n");
-        print_hdr_icmp(packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t));
-        printf("-----------------------------------------\n");
-
-        /* if it's an ICMP echo request, send echo reply */
-        if (icmp_hdr->icmp_type == 8)
-        {
-            /* Construct ICMP echo reply */
-            send_icmp_message(sr, packet, inf, 0, 0, len);
-        }
-    }
-    else
-    {
-        printf("A TCP/UDP message.\n");
-        /* Send ICMP type 3 code 3: Port Unreachable */
-        send_icmp_message(sr, packet, inf, 3, 3, len);
-    }
-}
 
 void send_icmp_message(struct sr_instance *sr, uint8_t *packet, struct sr_if *inf, uint8_t icmp_type, uint8_t icmp_code, unsigned int len)
 {
