@@ -29,7 +29,7 @@ void handle_arpreq(struct sr_arpreq *req, struct sr_instance *sr) {
             {
                 struct sr_if* inf = sr_get_interface(sr, queued_pkts->iface);
                 if (inf)
-                    send_icmp_message(sr, queued_pkts->buf, inf, 3, 1, queued_pkts->len);
+                    process_icmp(sr, queued_pkts->buf, inf, 3, 1, queued_pkts->len);
                 queued_pkts = queued_pkts->next;
             }
             sr_arpreq_destroy(&sr->cache, req);
