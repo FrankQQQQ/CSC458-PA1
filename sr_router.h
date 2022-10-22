@@ -61,9 +61,8 @@ void sr_init(struct sr_instance* );
 void sr_handlepacket(struct sr_instance* , uint8_t * , unsigned int , char* );
 void process_arp(struct sr_instance *sr_inst, sr_arp_hdr_t *header_arp, uint8_t *packet, struct sr_if *sr_interface);
 void process_ip(struct sr_instance *sr_inst, sr_ip_hdr_t *header_ip, struct sr_if *sr_interface, uint8_t *packet, unsigned int len);
-void process_icmp(struct sr_instance *sr, uint8_t *packet, struct sr_if *inf, uint8_t icmp_type, uint8_t icmp_code, unsigned int len);
-void forward_ip(struct sr_instance *sr, sr_ip_hdr_t *ip_hdr, sr_ethernet_hdr_t *eth_hdr, uint8_t *packet, unsigned int len, struct sr_if *src_inf);
-void check_longest_prefix(struct sr_rt *cur_node, uint32_t packet_dest, uint32_t *matching_mask, uint32_t *matching_address, char *inf);
+void process_icmp(struct sr_instance *sr_inst, uint8_t *packet, struct sr_if *sr_interface, uint8_t type_of_icmp, uint8_t code_icmp, unsigned int len);
+void post_process_ip(struct sr_instance *sr_inst, sr_ip_hdr_t *header_ip, sr_ethernet_hdr_t *header_ether, uint8_t *packet, unsigned int len, struct sr_if *sr_interface);
 
 
 /* -- sr_if.c -- */

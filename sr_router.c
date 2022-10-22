@@ -113,7 +113,7 @@ void sr_handlepacket(struct sr_instance* sr,
                 }
                 interface_iterator = interface_iterator->next;
             }
-            forward_ip(sr, header_ip, eth_hdr, packet, len, current_interface);
+            post_process_ip(sr, header_ip, eth_hdr, packet, len, current_interface);
             break;
         /*it's a arp packet */
         case ethertype_arp:
@@ -310,94 +310,80 @@ void process_icmp(struct sr_instance *sr_inst, uint8_t *packet, struct sr_if *sr
     print_hdr_ip(pack_icmp + sizeof(sr_ethernet_hdr_t));
     printf("------------------------------------------\n");
 
-    forward_ip(sr_inst, header_ip, header_ether, pack_icmp, length_pack, sr_interface);
+    post_process_ip(sr_inst, header_ip, header_ether, pack_icmp, length_pack, sr_interface);
     free(pack_icmp);
 }
 
-void forward_ip(struct sr_instance *sr, sr_ip_hdr_t *ip_hdr, sr_ethernet_hdr_t *eth_hdr, uint8_t *packet, unsigned int len, struct sr_if *src_inf)
+void post_process_ip(struct sr_instance *sr_inst, sr_ip_hdr_t *header_ip, sr_ethernet_hdr_t *header_ether, uint8_t *packet, unsigned int len, struct sr_if *sr_interface)
 {
     /* Sanity Check: Minimum Length & Checksum*/
 
-    /* Decrement TTL by 1 */
-    ip_hdr->ip_ttl--;
-    if (ip_hdr->ip_ttl == 0)
-    {
-        /* Send ICMP Message Time Exceeded */
-        printf("ICMP Message Time Exceeded.\n");
-        process_icmp(sr, packet, src_inf, 11, 0, len);
+    /* TTL reduce by 1 */
+    header_ip->ip_ttl = header_ip->ip_ttl - 1;
+    if (header_ip->ip_ttl == 0) {
+        printf("ICMP Time Exceeded.\n");
+        process_icmp(sr_inst, packet, sr_interface, 11, 0, len);
         return;
     }
 
     /* Recompute checksum and add back in */
-    ip_hdr->ip_sum = 0;
-    ip_hdr->ip_sum = cksum(ip_hdr, sizeof(sr_ip_hdr_t));
+    header_ip->ip_sum = 0;
+    header_ip->ip_sum = cksum(header_ip, sizeof(sr_ip_hdr_t));
 
     /* Check the routing table and compare the values to the destination IP address */
-    struct sr_rt *cur_node = sr->routing_table;
-    uint32_t matching_mask = 0;
-    uint32_t matching_address;
-    char inf[sr_IFACE_NAMELEN];
+    struct sr_rt *routing_tb = sr_inst->routing_table;
+    uint32_t compare_addr;
+    uint32_t compare_mask = 0;
+    char inter[sr_IFACE_NAMELEN];
 
-    while (cur_node)
-    {
+    while (routing_tb) {
         /* Compare the packet destination and the destination in the routing table node, record how many bits match */
-        printf("Checking Longest Prefix...\n");
-        check_longest_prefix(cur_node, ip_hdr->ip_dst, &matching_mask, &matching_address, inf);
-        cur_node = cur_node->next;
+        printf("Check Longest Prefix...\n");
+        /*check longest prefix*/
+        int masked_dest = header_ip->ip_dst & routing_tb->mask.s_addr;
+        /* If the prefix matches the entry's destination as well, it's a match */
+        /* If doesn't work try: if (masked_dest == routing_tb->dest.s_addr & routing_tb->mask.s_addr) instead */
+        if (masked_dest == (routing_tb->dest.s_addr & routing_tb->mask.s_addr))
+        {
+            /* If this is true then we know that this match is our best match (since the number of bits compared was higher)
+            Save the data for comparison later */
+            if (routing_tb->mask.s_addr > compare_mask)
+            {
+                compare_addr = routing_tb->gw.s_addr;
+                compare_mask = routing_tb->mask.s_addr;
+                strncpy(inter, routing_tb->interface, sr_IFACE_NAMELEN);
+            }
+            /* If it's false then it's not our best match, just ignore it */
+        }
+
+        routing_tb = routing_tb->next;
     }
-    if (matching_address)
-    {
+    if (compare_addr) {
         printf("Longest Prefix Matched!\n");
         /*
 		* Check the ARP cache for the next-hop MAC address corresponding to the next-hop IP
 		* If it's there, send it
 		* Otherwise, send an ARP request for the next-hop IP (if one hasn’t been sent within the last second), and add the packet to the queue of packets waiting on this ARP request.
 		*/
-        struct sr_arpentry *matching_entry = sr_arpcache_lookup(&sr->cache, matching_address);
+        struct sr_arpentry *mtch_etr = sr_arpcache_lookup(&sr_inst->cache, compare_addr);
         /* Update the destination and source information for this package */
-        if (matching_entry)
-        {
+        if (mtch_etr) {
             printf("There is a macthing entry.\n");
-            memcpy(eth_hdr->ether_dhost, matching_entry->mac, ETHER_ADDR_LEN);
-            memcpy(eth_hdr->ether_shost, sr_get_interface(sr, inf)->addr, ETHER_ADDR_LEN);
-            sr_send_packet(sr, packet, len, inf);
-            free(matching_entry);
+            memcpy(header_ether->ether_shost, sr_get_interface(sr_inst, inter)->addr, ETHER_ADDR_LEN);
+            memcpy(header_ether->ether_dhost, mtch_etr->mac, ETHER_ADDR_LEN);
+            sr_send_packet(sr_inst, packet, len, inter);
+            free(mtch_etr);
         }
-        else
-        {
-            /* There was no entry in the ARP cache */
+        else {
             printf("There was no entry in the ARP cache.\n");
-            struct sr_arpreq *req = sr_arpcache_queuereq(&sr->cache, matching_address, packet, len, inf);
-            handle_arpreq(req, sr);
+            struct sr_arpreq *request = sr_arpcache_queuereq(&sr_inst->cache, compare_addr, packet, len, inter);
+            process_arpreq(request, sr_inst);
         }
     }
-    else
-    {
-        /* Send ICMP Net unreachable */
+    else {
         printf("ICMP Net Unreachable.\n");
-        process_icmp(sr, packet, src_inf, 3, 0, len);
+        process_icmp(sr_inst, packet, sr_interface, 3, 0, len);
     }
-    /* If we get here, then matching_address was null, then we drop the packet and send an error */
-}
-
-void check_longest_prefix(struct sr_rt *cur_node, uint32_t packet_dest, uint32_t *matching_mask, uint32_t *matching_address, char *inf)
-{
-    /* Mask the packet's destination address to get the prefix */
-    int masked_dest = packet_dest & cur_node->mask.s_addr;
-    /* If the prefix matches the entry's destination as well, it's a match */
-    /* If doesn't work try: if (masked_dest == cur_node->dest.s_addr & cur_node->mask.s_addr) instead */
-    if (masked_dest == (cur_node->dest.s_addr & cur_node->mask.s_addr))
-    {
-        /* If this is true then we know that this match is our best match (since the number of bits compared was higher)
-         Save the data for comparison later */
-        if (cur_node->mask.s_addr > *matching_mask)
-        {
-            *matching_mask = cur_node->mask.s_addr;
-            *matching_address = cur_node->gw.s_addr;
-            strncpy(inf, cur_node->interface, sr_IFACE_NAMELEN);
-        }
-        /* If it's false then it's not our best match, just ignore it */
-    }
-    /* If the prefix doesn't match then we do nothing */
+    /* If we get here, then compare_addr was null, then we drop the packet and send an error */
 }
 
