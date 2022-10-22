@@ -301,7 +301,7 @@ void process_icmp(struct sr_instance *sr_inst, uint8_t *packet, struct sr_if *sr
         memcpy(header_icmp->data, packet + sizeof(sr_ethernet_hdr_t), sizeof(sr_ip_hdr_t));
         /* Copy the first 8 bytes of original datagram's data into the data */
         memcpy(header_icmp->data + sizeof(sr_ip_hdr_t), packet + sizeof(sr_ip_hdr_t) + sizeof(sr_ethernet_hdr_t), 8);
-        header_icmp->icmp_sum = cksum(header_icmp, ntohs(header_ip->ip_len) - (4 * header_ip->ip_hl));
+        header_icmp->icmp_sum = cksum(header_icmp, sizeof(sr_icmp_t3_hdr_t));
     }
 
     printf("----------- Send ICMP Message ------------\n");
